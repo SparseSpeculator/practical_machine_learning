@@ -1,0 +1,94 @@
+---
+title: "
+"
+author: "Sebastian Ruecker"
+date: "5 November 2017"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require(ggplot2)
+require(GGally)
+require(dplyr)
+mtc <- mtcars
+mtc$am <- factor(mtc$am)
+```
+
+## Executive Summary
+While at first glance transmission seems to have a significant influence on miles per gallon (mpg), we find that the relationship largely vanishesm when we control for other factors such as cylinders or horse powers (hp). There may be a small influence for small cars, but no major influence can be asserted from the small data set.
+
+## Analysis
+We investigate the relationship between the type of transmission and miles per gallon. The data we are using for this analysis comes from 32 automobiles. A summary of the features in the data can be found in the appendix.
+
+First, we look at the direct relationship between transmission and mpg by plotting their respective distributions in the form of a box plot.
+```{r, echo=FALSE, fig.height=2, fig.align="center"}
+g <- ggplot(data = mtc, mapping=aes(x=factor(am), y=mpg))
+g + geom_boxplot() + scale_x_discrete(labels=c("automatic", "manual")) + xlab("Transmission")
+```
+In this plot transmission and mpg clearly correlate. Here mpg is lower for automatic transmission.
+However, if we control by number of cylinders, the effect becomes much smaller. The plot for this analysis is in the appendix.
+We now investigate if our initial exploratory analysis is borne out by statistical models.
+We begin by fitting a logit model where we try to explain mpg by kind of transmission.
+```{r, echo=TRUE}
+m1 <- lm(mpg~I(factor(am))-1, data=mtc)
+coef(summary(m1))
+```
+```{r, echo=FALSE}
+me1 <- coef(m1)[1]
+me2 <- coef(m1)[1]
+```
+We estimate the model by explicitly removing the intercept. This way, the model has two separate intercepts which can be interpreted as the mean mpg of cars with either type of transmission. As we can see, cars with manual transmission have a mean of `r me1` while cars with automatic transmission have a mean mpg of `me2`. Both coefficients are significant at p-values well below 0.001. 
+
+The relationship between mpg and transmission may be confounded by how powerful a car is. The correlation matrix in the appendix shows that the features in the data set are correlated. Hence, we should not add too many of them to the model to avoid multicolinearity. We add horsepower (hp) and the weight of the car (wt) to the model.
+
+```{r, echo=TRUE}
+m2 <- update(m1, .~.+hp+wt)
+coef(summary(m2))
+```
+Both coefficients are highly significant. We see that mpg does down when hp or weight goes up. 
+We also observe, that the difference between the two intercepts for the two kinds of transmission decreases dramatically with the addition of hp and wt. To avoid multicolinearity, we perform a principal component analysis on the variables in the data set and fit a model on the first 3 principal components plus the kind transmission.
+
+```{r, echo=TRUE}
+mtc_pca <- prcomp(as_tibble(mtcars))
+mtc <- cbind(mtc, mtc_pca$x)
+m3 <- lm(mpg~I(factor(am))-1+PC1+PC2+PC3, data=mtc)
+coef(summary(m3))
+```
+All three principal components are highly significant. The influence of transmission diminishes to the point of being negligible.
+
+We perform an anova analysis to find the best model from the ones we fitted. The output can be found in the appendix.
+We conclude, that the last model is the best one, judging by the residual sum of squared errors.
+
+Diagnostic plots for our last model can be found in the appendix. In these plots we can see, that the Maserati Bora is a bit of an outlier judging by cooks distance. The plot of residuals VS fitted looks like there is no auto-correlation between residuals. The normal-qq-plot shows that the distribution of the residuals is close to normal with a bit of deviation at the upper end of the distribution.
+
+## Conclusion 
+Our models suggest that if there is a general connection between mpg and transmission, it is too small to be relevant in practice. 
+There may be a connection between mpg and transmission for certain car types but the sample size is to low to reliably conduct an analysis on a smaller subset of cars. In future work we could collect data for more cars  and repeat our analysis on subsets.
+
+## Appendix
+Summary of data features:
+```{r, echo=FALSE}
+summary(mtcars)
+```
+Plot of influence of transmission on mpg, split by number of cylinders:
+```{r, echo=FALSE, fig.height=2, fig.align="center"}
+g <- ggplot(data = mtc, mapping=aes(x=factor(am), y=mpg))
+g + geom_boxplot()  + 
+  facet_wrap( ~ cyl) + 
+  scale_x_discrete(labels=c("automatic", "manual")) + xlab("Transmission")
+```
+correlation between features:
+```{r, echo=TRUE}
+cor(select(mtc, wt, cyl, hp, disp, carb, gear))
+```
+Diagnostic plots for last model:
+```{r, echo=TRUE}
+par(mfrow=c(2,2))
+plot(m3)
+par(mfrow=c(1,1))
+```
+Anova analysis:
+```{r, echo=TRUE}
+anova(m1,m2,m3)
+```
