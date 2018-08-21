@@ -1,94 +1,163 @@
 ---
-title: "
-"
+title: "Predicting Motions from Human Activity Recognition Data"
 author: "Sebastian Ruecker"
-date: "5 November 2017"
-output: pdf_document
+date: "20 August 2018"
+output: html_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-require(ggplot2)
-require(GGally)
-require(dplyr)
-mtc <- mtcars
-mtc$am <- factor(mtc$am)
+```{r setup, include=FALSE, echo=FALSE}
+rm(list=ls())
+library(rpart)
+library(party)
+library(tidyverse)
+library(caret)
+library(doParallel)
+library(dplyr)
+library(Amelia)
+setwd("Z:/Coursera/Practical Machine Learning/Final machine learning")
+
+if (file.exists("pml_training.csv") == FALSE) {
+  download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", "pml_training.csv")
+}
+if (file.exists("pml_testing.csv") == FALSE) {
+  download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", "pml_testing.csv")
+}
+col_spec_train <- cols(
+  .default = col_double(),
+  X1 = col_integer(),
+  classe = col_character(),
+  user_name = col_character(),
+  raw_timestamp_part_1 = col_integer(),
+  raw_timestamp_part_2 = col_integer(),
+  cvtd_timestamp = col_character(),
+  new_window = col_character()
+)
+col_spec_test <- cols(
+  .default = col_double(),
+  X1 = col_integer(),
+  user_name = col_character(),
+  raw_timestamp_part_1 = col_integer(),
+  raw_timestamp_part_2 = col_integer(),
+  cvtd_timestamp = col_character(),
+  new_window = col_character()
+)
+
+set.seed(1)
 ```
 
-## Executive Summary
-While at first glance transmission seems to have a significant influence on miles per gallon (mpg), we find that the relationship largely vanishesm when we control for other factors such as cylinders or horse powers (hp). There may be a small influence for small cars, but no major influence can be asserted from the small data set.
+## Data
+We used Data from the Human Activity Recognition Data available here: <http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har>
+
+Personal fitness devices were used by 6 users to record their movements. From these data we estimate which of 5 different motions they performed. The data consists of sensor data for movements along various axis.
+
+## Preprocessing
+```{r, include=FALSE, echo=FALSE}
+pml_training_raw <- read_csv("pml_training.csv", na = c("#DIV/0!", "", "NA"), trim_ws = TRUE, col_types = col_spec_train)
+pml_testing_raw <- read_csv("pml_testing.csv", na = c("#DIV/0!", "", "NA"), trim_ws = TRUE, col_types = col_spec_test)
+
+pml_training <- dplyr::rename(pml_training_raw,
+                              user_ = user_name,
+                              class = classe,
+                              kurtosis_pitch_arm = kurtosis_picth_arm,
+                              kurtosis_pitch_belt = kurtosis_picth_belt,
+                              kurtosis_pitch_dumbbell = kurtosis_picth_dumbbell,
+                              kurtosis_pitch_forearm = kurtosis_picth_forearm) %>% 
+  dplyr::mutate(user_ = factor(user_), class = factor(class)) %>%
+  cbind(., 
+        predict(dummyVars(~ user_, data =.),newdata=.)) %>%
+  dplyr::select(class, starts_with("user"), everything(), -starts_with("raw_t"), -cvtd_timestamp, -num_window, -new_window, -user_, -num_window, -X1)
+
+pml_testing <- dplyr::rename(pml_testing_raw,
+                             user_ = user_name,
+                             kurtosis_pitch_arm = kurtosis_picth_arm,
+                             kurtosis_pitch_belt = kurtosis_picth_belt,
+                             kurtosis_pitch_dumbbell = kurtosis_picth_dumbbell,
+                             kurtosis_pitch_forearm = kurtosis_picth_forearm) %>% 
+  dplyr::mutate(user_ = factor(user_)) %>%
+  cbind(., 
+        predict(dummyVars(~ user_, data =.),newdata=.)) %>%
+  dplyr::select(starts_with("user"), everything(), -starts_with("raw_t"), -cvtd_timestamp, -num_window, -new_window, -user_, -num_window, -X1)
+```
+
+19622 records data are available for analysis. All columns with more than 90% percent of missing values were removed, leaving 58 columns of explatory variables: the six dummy variables for the different users plus 52 columns of sensor readings. The remaining data contain no more missing values
+
+```{r}
+missing_perc <- data.frame(train=sort(apply(pml_training, 2, FUN=function(x) mean(is.na(x)))),
+                           test=sort(apply(pml_testing, 2, FUN=function(x) mean(is.na(x)))))
+pml_training_prune <- pml_training[,rownames(missing_perc)[missing_perc$train<.9]]
+pml_testing_prune <- pml_testing[,rownames(missing_perc)[missing_perc$train<.9][-1]]
+
+anyNA(pml_training_prune) | anyNA(pml_training_prune)
+```
+
+We split the data into test-set and training-set, using 80% of available data for training. 
+Since the data contain a large number of mutually depedant variables, we use PCA to reduce the number of variables and to eliminate multicolinearity.
+
+```{r}
+prep <- preProcess(pml_training_prune, method="pca")
+prep_training <- predict(prep, pml_training_prune) 
+```
+
+## Modelling
+With the resulting training set, several models were built. The used models were:
+
+* Random fForest
+* Penalized Multinomial Regression
+* Stochastic Gradient Boosting
+* Neural Network
+* K-Nearest-Neighbour-Classification 
+
+We use 3-fold cros validation for the random forest. To save computation time, we don't use cross validation for the other models.
+
+```{r, include=FALSE, echo=FALSE}
+train_idx <- createDataPartition(prep_training$class, p=.8, list = FALSE)
+dtrain <- prep_training[train_idx,]
+dtest <- prep_training[-train_idx,]
+
+cores <- detectCores()
+cl <- makeCluster(cores)
+registerDoParallel(cl)
+train_control <- trainControl(method="cv", number=3, savePredictions = TRUE)
+
+m_rfo <- train(class~., data = dtrain, metric="Accuracy", method="rf", trControl = train_control)
+m_mul <- train(class~., data = dtrain, method="multinom", verbose=FALSE)
+m_gbm <- train(class~., data = dtrain, method="gbm", verbose=FALSE)
+m_rnn <- train(class~., data = dtrain, method="nnet", verbose=FALSE)
+m_knn <- knn3(class~., data = dtrain)
+
+stopCluster(cl)
+registerDoSEQ()
+
+cm_m_knn <- confusionMatrix(dtest$class,factor(apply(predict(m_knn, dtest), 1, which.max), labels=c("A", "B", "C", "D", "E")))
+cm_m_gbm <- confusionMatrix(dtest$class,factor(apply(predict(m_gbm$finalModel, dtest, n.trees = 1), 1, which.max), labels=c("A", "B", "C", "D", "E")))
+cm_m_rnn <- confusionMatrix(dtest$class,factor(apply(predict(m_rnn$finalModel, dtest), 1, which.max), labels=c("A", "B", "C", "D", "E")))
+cm_m_rfo <- confusionMatrix(dtest$class,predict(m_rfo$finalModel, dtest))
+cm_m_mul <- confusionMatrix(dtest$class,predict(m_mul$finalModel, dtest))
+model_stats <- t(data_frame(
+  knn=cm_m_knn$overall,
+  gbm=cm_m_gbm$overall, 
+  rnn=cm_m_rnn$overall, 
+  rfo=cm_m_rfo$overall, 
+  mul=cm_m_mul$overall))
+methods <- rownames(model_stats)
+colnames(model_stats) <- names(cm_m_gbm$overall)
+as_data_frame(model_stats) %>% 
+  mutate(m = methods) %>% 
+  select(m, everything()) %>% 
+  arrange(-Accuracy)
+```
 
 ## Analysis
-We investigate the relationship between the type of transmission and miles per gallon. The data we are using for this analysis comes from 32 automobiles. A summary of the features in the data can be found in the appendix.
+As we see, the models perform quite differently on the test dataset. The best accuracy is achieved by the random forest.
+```{r}
+model_stats
+```
 
-First, we look at the direct relationship between transmission and mpg by plotting their respective distributions in the form of a box plot.
-```{r, echo=FALSE, fig.height=2, fig.align="center"}
-g <- ggplot(data = mtc, mapping=aes(x=factor(am), y=mpg))
-g + geom_boxplot() + scale_x_discrete(labels=c("automatic", "manual")) + xlab("Transmission")
-```
-In this plot transmission and mpg clearly correlate. Here mpg is lower for automatic transmission.
-However, if we control by number of cylinders, the effect becomes much smaller. The plot for this analysis is in the appendix.
-We now investigate if our initial exploratory analysis is borne out by statistical models.
-We begin by fitting a logit model where we try to explain mpg by kind of transmission.
-```{r, echo=TRUE}
-m1 <- lm(mpg~I(factor(am))-1, data=mtc)
-coef(summary(m1))
-```
+This performance carries over to the test-set. The random forest is almost as accurate on fresh data. We expect the out-of sample error to be in the same ballpark for different data.
+
 ```{r, echo=FALSE}
-me1 <- coef(m1)[1]
-me2 <- coef(m1)[1]
+confusionMatrix(dtest$class,factor(predict(m_rfo$finalModel, dtest)))
 ```
-We estimate the model by explicitly removing the intercept. This way, the model has two separate intercepts which can be interpreted as the mean mpg of cars with either type of transmission. As we can see, cars with manual transmission have a mean of `r me1` while cars with automatic transmission have a mean mpg of `me2`. Both coefficients are significant at p-values well below 0.001. 
 
-The relationship between mpg and transmission may be confounded by how powerful a car is. The correlation matrix in the appendix shows that the features in the data set are correlated. Hence, we should not add too many of them to the model to avoid multicolinearity. We add horsepower (hp) and the weight of the car (wt) to the model.
-
-```{r, echo=TRUE}
-m2 <- update(m1, .~.+hp+wt)
-coef(summary(m2))
-```
-Both coefficients are highly significant. We see that mpg does down when hp or weight goes up. 
-We also observe, that the difference between the two intercepts for the two kinds of transmission decreases dramatically with the addition of hp and wt. To avoid multicolinearity, we perform a principal component analysis on the variables in the data set and fit a model on the first 3 principal components plus the kind transmission.
-
-```{r, echo=TRUE}
-mtc_pca <- prcomp(as_tibble(mtcars))
-mtc <- cbind(mtc, mtc_pca$x)
-m3 <- lm(mpg~I(factor(am))-1+PC1+PC2+PC3, data=mtc)
-coef(summary(m3))
-```
-All three principal components are highly significant. The influence of transmission diminishes to the point of being negligible.
-
-We perform an anova analysis to find the best model from the ones we fitted. The output can be found in the appendix.
-We conclude, that the last model is the best one, judging by the residual sum of squared errors.
-
-Diagnostic plots for our last model can be found in the appendix. In these plots we can see, that the Maserati Bora is a bit of an outlier judging by cooks distance. The plot of residuals VS fitted looks like there is no auto-correlation between residuals. The normal-qq-plot shows that the distribution of the residuals is close to normal with a bit of deviation at the upper end of the distribution.
-
-## Conclusion 
-Our models suggest that if there is a general connection between mpg and transmission, it is too small to be relevant in practice. 
-There may be a connection between mpg and transmission for certain car types but the sample size is to low to reliably conduct an analysis on a smaller subset of cars. In future work we could collect data for more cars  and repeat our analysis on subsets.
-
-## Appendix
-Summary of data features:
-```{r, echo=FALSE}
-summary(mtcars)
-```
-Plot of influence of transmission on mpg, split by number of cylinders:
-```{r, echo=FALSE, fig.height=2, fig.align="center"}
-g <- ggplot(data = mtc, mapping=aes(x=factor(am), y=mpg))
-g + geom_boxplot()  + 
-  facet_wrap( ~ cyl) + 
-  scale_x_discrete(labels=c("automatic", "manual")) + xlab("Transmission")
-```
-correlation between features:
-```{r, echo=TRUE}
-cor(select(mtc, wt, cyl, hp, disp, carb, gear))
-```
-Diagnostic plots for last model:
-```{r, echo=TRUE}
-par(mfrow=c(2,2))
-plot(m3)
-par(mfrow=c(1,1))
-```
-Anova analysis:
-```{r, echo=TRUE}
-anova(m1,m2,m3)
-```
+## Conclusion
+We conclude, that random forests can reliably predict motions from sensor data that has been preprocessed by PCA.
